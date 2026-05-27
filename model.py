@@ -1,9 +1,9 @@
 """
 EmoFlowModel: end-to-end pipeline.
 
-  text         → (frozen LLaMA + LoRA) → appraisal_t (5d)
-  appraisal_t  → TemporalMemory(λ)      → memory_state_t (5d)
-  (memory_t, appraisal_t) → BayesianHead → posterior_logits (K-dim)
+  text         → (frozen LLaMA + LoRA) → appraisal_t (8d)
+  appraisal_t  → TemporalMemory(λ)      → memory_state_t (8d)
+  (memory_t, appraisal_t) → BayesianHead → posterior_logits (K-dim, K=6 multilabel)
 
 `forward(batch)` takes the collated dict from [[dataloader.py]] and returns
 emotion logits (B, T, K), plus the intermediate appraisal vectors (for the
@@ -29,7 +29,7 @@ _DEFAULT_APPRAISAL_DIM = len(APPRAISAL_DIMS)
 # ---------- MockEncoder for end-to-end testing without LLaMA ----------
 
 class MockEncoder(nn.Module):
-    """Random-but-deterministic 5-d appraisal output per utterance.
+    """Random-but-deterministic 8-d appraisal output per utterance.
 
     Same call surface as StimulusEncoder.encode_text + forward, so the rest
     of the pipeline can be exercised before the real Encoder is trained.
@@ -73,7 +73,7 @@ class EmoFlowModel(nn.Module):
                                   hidden=bayes_hidden)
 
     def _encode_dialogues(self, batch: dict, device) -> torch.Tensor:
-        """Flatten (B, T) → (N_valid,), encode, scatter back to (B, T, 5)."""
+        """Flatten (B, T) → (N_valid,), encode, scatter back to (B, T, 8)."""
         utt_mask = batch["utt_mask"]                            # (B, T) bool np
         flat_idx = np.argwhere(utt_mask)                        # (N, 2)
         texts = [batch["text"][b][t] for b, t in flat_idx]
@@ -97,7 +97,7 @@ class EmoFlowModel(nn.Module):
         if device is None:
             device = next(self.parameters()).device
 
-        appraisal = self._encode_dialogues(batch, device)        # (B, T, 5)
+        appraisal = self._encode_dialogues(batch, device)        # (B, T, 8)
         turn_idx = torch.from_numpy(batch["turn_idx"]).to(device)
         utt_mask = torch.from_numpy(batch["utt_mask"]).to(device)
 
@@ -105,8 +105,8 @@ class EmoFlowModel(nn.Module):
         bayes = self.bayes(memory_state, appraisal)
 
         return {
-            "appraisal":        appraisal,                       # (B, T, 5)
-            "memory_state":     memory_state,                    # (B, T, 5)
+            "appraisal":        appraisal,                       # (B, T, 8)
+            "memory_state":     memory_state,                    # (B, T, 8)
             "prior_logits":     bayes["prior_logits"],           # (B, T, K)
             "likelihood_logits":bayes["likelihood_logits"],
             "posterior_logits": bayes["posterior_logits"],

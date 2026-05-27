@@ -84,14 +84,17 @@ python preprocess.py            # writes data_processed/{meld,emorynlp,dailydial
 
 ## Training
 
-**Main MELD run** (EmoFlow with DistilBERT backbone):
+**Main MELD run** — the exact config behind the wF1 = 0.62 headline (see `ckpt_lambda/emoflow_meld_ddrare3_os/args.json`):
 
 ```bash
 python train.py --model emoflow --dataset meld \
-                --backbone distilbert-base-uncased \
-                --epochs 5 --batch_size 8 --lr 5e-4 \
-                --appraisal_alpha 0.5
+                --backbone meta-llama/Meta-Llama-3-8B \
+                --multilabel --dd_rare fear,disgust,sadness --oversample \
+                --epochs 3 --batch_size 2 --lr 5e-4 \
+                --appraisal_alpha 0.1 --init_lambda 0.1 --seed 42
 ```
+
+For a fast smoke test without GPU access, swap in `--backbone distilbert-base-uncased`.
 
 **Baselines:**
 
@@ -126,14 +129,27 @@ predictions.csv      dialogue_id, turn_idx, y_true, y_pred
 
 ---
 
-## Reproducing the headline number
+## Reproducing the results table
+
+The four rows of the main table (REPORT §7.1) come from these runs — all share
+`--dataset meld --multilabel --dd_rare fear,disgust,sadness --oversample --epochs 3 --batch_size 2 --lr 5e-4 --appraisal_alpha 0.1`:
 
 ```bash
-bash overnight.sh                # full sweep used in the report
-python make_table.py             # collates ckpt/*/metrics.json into the results table
+# EmoFlow (learned λ)  → wF1 0.6171
+python train.py --model emoflow  --backbone meta-llama/Meta-Llama-3-8B [shared flags] --init_lambda 0.1
+# EmoFlow (λ=0, no decay)  → wF1 0.6052
+python train.py --model emoflow  --backbone meta-llama/Meta-Llama-3-8B [shared flags] --init_lambda 0 --freeze_lambda
+# Stateless baseline  → wF1 0.5631
+python train.py --model stateless --backbone meta-llama/Meta-Llama-3-8B [shared flags]
+# LSTM baseline  → wF1 0.4241
+python train.py --model lstm      --backbone meta-llama/Meta-Llama-3-8B [shared flags]
+
+python make_table.py             # collates ckpt_lambda/*/metrics.json into the results table
 ```
 
-The MELD wF1 = 0.62 figure corresponds to the `emoflow` run with the **sigmoid-saturation fix** (see REPORT §6) and rare-class augmentation from DailyDialog enabled via `--dd_rare`.
+The MELD wF1 = 0.62 figure corresponds to the EmoFlow (learned λ) run with the **sigmoid-saturation fix** (see REPORT §6) and rare-class augmentation from DailyDialog enabled via `--dd_rare`.
+
+> Note: `overnight.sh` is an earlier EmoryNLP-targeted sweep and does **not** reproduce the MELD headline; use the commands above.
 
 ---
 

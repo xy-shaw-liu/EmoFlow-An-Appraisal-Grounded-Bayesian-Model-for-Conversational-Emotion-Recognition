@@ -5,8 +5,8 @@ Architecture (per EmoFlow project structure D3-D5):
   text  →  frozen backbone (Meta-Llama-3-8B; locally distilbert for dev)
        →  LoRA-adapted attention
        →  pooled utterance representation h ∈ R^d
-       →  AppraisalHead: Linear(d → 5) + sigmoid
-       →  appraisal vector ∈ [0, 1]^5  (matches Scherer Table 5.5 normalized targets)
+       →  AppraisalHead: Linear(d → d) → GELU → Linear(d → 8)   (NO sigmoid; see §6)
+       →  appraisal vector ∈ R^8  (regressed toward Scherer Table 5.5 [0,1] targets via MSE)
 
 Backbone is frozen; only LoRA adapters + AppraisalHead are trained. Swap
 `backbone_name="meta-llama/Meta-Llama-3-8B"` after HF gated access lands.
@@ -58,7 +58,7 @@ def _pool(hidden: torch.Tensor, attention_mask: torch.Tensor, how: str) -> torch
 
 
 class StimulusEncoder(nn.Module):
-    """Frozen backbone + LoRA + AppraisalHead. Produces 5-d appraisal vector."""
+    """Frozen backbone + LoRA + AppraisalHead. Produces 8-d appraisal vector."""
 
     def __init__(
         self,
@@ -123,7 +123,7 @@ class StimulusEncoder(nn.Module):
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        """input_ids/attention_mask: (B, T). Returns (B, 5) appraisal vector."""
+        """input_ids/attention_mask: (B, T). Returns (B, 8) appraisal vector."""
         out = self.backbone(input_ids=input_ids,
                             attention_mask=attention_mask,
                             output_hidden_states=False)

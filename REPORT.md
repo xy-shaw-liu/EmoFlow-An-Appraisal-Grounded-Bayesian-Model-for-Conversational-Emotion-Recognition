@@ -523,15 +523,19 @@ All baselines use the same configuration (multilabel BCE, $\alpha = 0.1$, MELD +
 
 ### 7.2 Comparison with Published Models on MELD
 
-| Model | Year | wF1 | Parameters |
-|-------|-----:|----:|-----------:|
-| DialogueGCN | 2019 | 0.58 | ~5M |
-| DialogueRNN | 2019 | 0.59 | ~3M |
-| **EmoFlow (ours)** | 2026 | **0.62** | **~20M trainable** |
-| COSMIC | 2020 | 0.65 | ~340M (BERT-large) |
-| MMGCN | 2021 | 0.66 | ~110M+ |
+| Model | Year | MELD wF1 | Setting / params |
+|-------|-----:|---------:|------------------|
+| DialogueRNN | 2019 | 0.57 | text · ~3M |
+| DialogueGCN | 2019 | 0.58 | text · ~5M |
+| MMGCN† | 2021 | 0.59 | multimodal · ~110M+ |
+| **EmoFlow (ours)** | 2026 | **0.62** | text · **~20M trainable** |
+| COSMIC | 2020 | 0.65 | text · BERT-large ~340M |
 
-EmoFlow surpasses DialogueRNN and DialogueGCN, approaches COSMIC and MMGCN, using **only LoRA adapters on a frozen backbone**.
+All figures are MELD 7-class weighted-F1 on the test set. †MMGCN's frequently-quoted 0.66 is its **IEMOCAP** score; on MELD it reports **58.65** (Hu et al. 2021, Table 4). DialogueRNN's MELD wF1 is **57.03** and COSMIC's is **65.21** (Ghosal et al. 2020, Table 4 — the same table also lists DialogueRNN).
+
+On the raw MELD test number, EmoFlow (0.62) lands above DialogueRNN, DialogueGCN, and MMGCN, and below COSMIC, using only LoRA adapters on a frozen backbone.
+
+**Important caveat — this is an indicative, not a controlled, comparison.** EmoFlow's 0.62 is obtained with selective cross-dataset rare-class augmentation (MELD + DailyDialog `dd_rare`; §4.5), whereas the published baselines train on MELD train only. Without augmentation, post-fix EmoFlow scores **wF1=0.42** on MELD (§4.5) — below these baselines — so the bulk of the +0.20 gap to our headline is attributable to the augmentation data, not the architecture in isolation. The *controlled* architectural comparison, in which EmoFlow, Stateless, and LSTM are all trained on the identical MELD+DD-rare3+oversample data, is the ablation in §7.1/§7.5, where EmoFlow's structured memory beats the Stateless and LSTM baselines by +5.4 and +19.3 wF1. Cross-architecture / cross-modality / cross-data comparisons to published numbers should therefore be read as context, not as a controlled claim of superiority.
 
 ### 7.3 Per-class Breakdown (EmoFlow Full)
 
@@ -623,7 +627,7 @@ This section is explicit about what we set out to do (per the project proposal) 
 
 **(d) Fear class not learned.** Despite augmentation and oversampling, fear F1 remains 0. The model has insufficient signal to discriminate fear from related negative emotions in our 8-dim representation.
 
-**(e) Bounded by frozen backbone.** With ~20M trainable parameters on top of frozen LLaMA-3-8B, our model approaches but does not exceed fine-tuning-based methods (COSMIC, MMGCN) that train hundreds of millions of parameters.
+**(e) Bounded by frozen backbone, and headline depends on augmentation.** With ~20M trainable parameters on top of frozen LLaMA-3-8B, our model reaches but does not exceed COSMIC (fine-tuned BERT-large, ~340M). Moreover, our 0.62 headline relies on cross-dataset augmentation that the published baselines do not use (§7.2); MELD-only post-fix EmoFlow is 0.42. We therefore do not claim a controlled win over published models — our controlled evidence is the matched-data ablation in §7.1/§7.5.
 
 **(f) No multimodal information.** MELD includes audio and video; we use text only. Audio prosody and facial expression provide strong fear/sadness signals we cannot access.
 
