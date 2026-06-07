@@ -1,0 +1,239 @@
+% This must be in the first 5 lines to tell arXiv to use pdfLaTeX, which is strongly recommended.
+\pdfoutput=1
+
+\documentclass[11pt]{article}
+
+\usepackage[]{acl}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\title{EmoFlow: Appraisal-Grounded Bayesian-Inspired Emotion Flow for Conversational Emotion Recognition}
+
+\author{Xiaoyi Liu \and Zhiye Jiang \and Ruitian Liu \\
+  UC Davis \\
+  ECS 271 Machine Learning}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Conversational emotion recognition (ERC) requires predicting the emotion of each dialogue turn while accounting for context, emotion persistence, and severe label imbalance. We present EmoFlow, an appraisal-grounded, Bayesian-inspired classifier for ERC. EmoFlow maps each utterance to an 8-dimensional appraisal bottleneck weakly supervised by emotion-level appraisal prototypes, aggregates past appraisals with a causal exponential-decay memory, and combines current evidence with contextual prior logits through log-additive fusion. Under our in-repository MELD setup with selective DailyDialog rare-class augmentation, the project report documents a weighted F1 of 0.6171 for learned decay, compared with 0.6052 for no decay, 0.5631 for a stateless classifier, and 0.4241 for a BiLSTM-over-appraisals baseline. We also report a practical failure analysis: a sigmoid-bounded appraisal head collapsed representations, while removing the sigmoid restored input-dependent appraisals. We do not claim state-of-the-art performance or a controlled comparison with published MELD systems; checkpoints, processed data, and raw datasets are not fully included.
+\end{abstract}
+
+\section{Introduction}
+
+Conversational emotion recognition (ERC) asks a model to assign an emotion label to each utterance in a dialogue. Unlike isolated sentence-level emotion classification, ERC depends on discourse history: a short utterance such as ``Sure'' can be neutral, sarcastic, resigned, or joyful depending on what came before. Dialogue also contains emotion persistence. Anger, sadness, or excitement can continue across several turns even when a later utterance is lexically weak. Finally, ERC datasets are often highly imbalanced, with frequent neutral or joy labels and rare emotions such as fear and disgust. These properties make ERC a useful testbed for models that combine utterance-level evidence with structured context.
+
+EmoFlow targets this setting on the MELD label space of seven emotions: neutral, joy, sadness, anger, fear, disgust, and surprise. The project is motivated by the idea that emotion can be represented not only as a categorical label, but also as a structured appraisal of a stimulus. Appraisal theory, especially Scherer's Component Process Model, treats emotions as arising from evaluations of events along dimensions such as novelty, pleasantness, goal conduciveness, coping potential, and normative significance \citep{scherer2001appraisal}. This view suggests an interpretable bottleneck for ERC: instead of letting context, speaker state, and current evidence be entangled inside a generic hidden state, EmoFlow maps each utterance to appraisal-like features and then performs temporal and Bayesian-style reasoning over those features.
+
+The resulting model has three stages. First, a \textsc{StimulusEncoder} uses a frozen pretrained language-model backbone with LoRA adapters \citep{hu2021lora} and an appraisal head to produce an 8-dimensional appraisal vector for each utterance. Second, \textsc{TemporalMemory} aggregates past appraisal vectors with a learnable causal exponential-decay kernel. Third, \textsc{BayesianHead} computes prior logits from the memory state and likelihood logits from the current appraisal, then adds them to obtain posterior emotion logits. The model is Bayesian-inspired rather than fully Bayesian: the implemented system uses log-additive neural fusion, while an explicit Dirichlet--Categorical update remains future work.
+
+This report makes three conservative contributions. First, it documents an implemented appraisal-grounded ERC classifier and its code-level design. Second, it reports matched in-repository ablations comparing learned exponential decay, no decay, a stateless classifier, and a BiLSTM-over-appraisals baseline. Third, it records a failure analysis in which a sigmoid activation at the appraisal bottleneck caused representation collapse. The original course proposal included response generation and human coherence evaluation, but those components were deferred; this paper focuses on classification.
+
+We intentionally phrase the empirical claims as project-report findings rather than independently reproduced benchmark results. The repository contains source code, extracted report materials, and the ACL draft, but it does not include all raw datasets, processed data, checkpoints, or final metric logs. This matters because the strongest result uses selective cross-dataset augmentation. The controlled claim in this paper is therefore about implemented in-repository baselines under a shared setup, not about outperforming published ERC systems.
+
+\section{Method}
+
+\subsection{Problem Setup}
+
+Given a dialogue $U=(u_1,\ldots,u_T)$, the task is to predict an emotion label $y_t$ for every turn. In the MELD setting used by the project, the label set is
+\[
+\mathcal{E}=\{\text{neutral},\text{joy},\text{sadness},\text{anger},\text{fear},\text{disgust},\text{surprise}\}.
+\]
+Although MELD is a single-label dataset, the implementation uses a six-head sigmoid formulation over the non-neutral emotions. Neutral is represented as the all-zero target. At inference, the model computes sigmoid probabilities for the six non-neutral heads; if the maximum probability is below a threshold $\tau$, it predicts neutral, otherwise it predicts the highest-scoring non-neutral emotion. The project report documents $\tau=0.2$ as the selected threshold for the main MELD run.
+
+This formulation is an optimization device, not a claim that MELD has multi-label annotations. It changes how the classifier represents neutral: instead of competing with six non-neutral labels in a softmax, neutral becomes the absence of sufficiently confident non-neutral evidence. This design was introduced to reduce majority-label collapse, especially when neutral dominates the training distribution.
+
+\subsection{Weak Appraisal Supervision}
+
+EmoFlow uses weakly supervised appraisal targets rather than ground-truth psychological annotations. The implementation derives emotion-level appraisal prototypes from Scherer's Table 5.5 and keeps eight ISEAR-style dimensions: expectedness, unpleasantness, goal hindrance, external causation, coping potential, unfairness, immorality, and self consistency. Raw appraisal profiles for joy, fear, anger, sadness, and disgust are min-max normalized per dimension. Because ISEAR did not include surprise, the code derives a surprise prototype with low expectedness and other dimensions near baseline. Neutral, peaceful, and powerful labels have no appraisal profile and are masked out of the appraisal loss.
+
+For a turn $u_t$, the encoder predicts an appraisal vector $a_t \in \mathbb{R}^8$. When a target prototype $\hat{a}_{y_t}$ is available, training includes a masked mean-squared-error term. This bottleneck is intended to make the classifier's intermediate representation more interpretable and to connect the method to appraisal theory, while acknowledging that the supervision is approximate and label-derived.
+
+The bottleneck also creates a useful separation between representation and temporal inference. Rather than aggregating high-dimensional token representations directly, EmoFlow summarizes each utterance with a small vector whose dimensions have names. This makes the memory module simple: it need only combine appraisal states through time. The cost is that the appraisal representation can become a single point of failure, as seen in the sigmoid-saturation analysis below.
+
+\subsection{Architecture}
+
+Table~\ref{tab:components} summarizes the implemented modules. The \textsc{StimulusEncoder} supports DistilBERT and RoBERTa for development, and LLaMA-3-8B for the reported large-backbone setup. For LLaMA-class models, the code uses QLoRA-style 4-bit NF4 loading and trains LoRA adapters on attention projections. The appraisal head is a two-layer MLP,
+\[
+\mathrm{Linear}(d,d) \rightarrow \mathrm{GELU} \rightarrow \mathrm{Linear}(d,8),
+\]
+with no sigmoid on the output. This design choice is important: the project report and encoder comments document that a previous sigmoid-bounded bottleneck saturated and produced nearly constant appraisal vectors.
+
+The LoRA setup follows the parameter-efficient adaptation motivation of freezing most pretrained weights and training low-rank updates \citep{hu2021lora}. In EmoFlow, the language-model backbone supplies general utterance representations, while the trainable adapters and appraisal head specialize the representation for emotion appraisal. The README and slides report approximately 20M trainable parameters in the LLaMA-LoRA configuration, but the exact count should be verified from a final run because it depends on the loaded backbone and adapter configuration.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Module & Input & Output / role \\
+\midrule
+StimulusEncoder & utterance text & 8-d appraisal vector \\
+TemporalMemory & appraisal history & context memory state \\
+BayesianHead & appraisal, memory & posterior emotion logits \\
+\bottomrule
+\end{tabular}
+\caption{EmoFlow components. The implemented model separates current utterance evidence from contextual memory before Bayesian-inspired logit fusion.}
+\label{tab:components}
+\end{table}
+
+\subsection{Temporal Memory}
+
+The temporal component aggregates current and previous appraisal vectors with a causal exponential-decay kernel. For turn $t$ and prior turn $i \leq t$, the unnormalized weight is
+\[
+w_{t,i} = \exp(-\lambda (t-i)).
+\]
+The implementation computes a softmax over $-\lambda \Delta t$ with causal masking, so future utterances cannot affect the current prediction. The decay rate is parameterized as $\lambda=\mathrm{softplus}(\theta)$, ensuring non-negativity. When $\lambda=0$, memory becomes a uniform running average over previous and current appraisals; this gives a no-decay ablation.
+
+\subsection{Bayesian-Inspired Fusion}
+
+The \textsc{BayesianHead} implements a prior-likelihood decomposition in logit space. A prior MLP maps the memory state $h_t$ to context-driven logits, and a likelihood MLP maps the current appraisal $a_t$ to utterance-evidence logits:
+\[
+z_t = f_{\mathrm{prior}}(h_t) + f_{\mathrm{lik}}(a_t).
+\]
+This resembles Bayes' rule in log space, where posterior evidence combines a context prior and current likelihood. However, the model is not a full probabilistic Bayesian model: both terms are learned neural functions, and no explicit posterior distribution over parameters or Dirichlet concentration variables is maintained.
+
+The decomposition is still useful architecturally. If an utterance is emotionally ambiguous, the likelihood branch can remain weak while the prior branch supplies context from earlier turns. Conversely, when the current utterance contains strong affective evidence, the likelihood branch can override a weaker context prior. This separation is more interpretable than a single MLP over concatenated features, and it makes future ablations natural: one can remove or replace the prior branch to measure the contribution of memory.
+
+\subsection{Training Objective}
+
+Training combines emotion prediction and appraisal supervision:
+\[
+\mathcal{L} = \mathcal{L}_{\mathrm{emo}} + \alpha \mathcal{L}_{\mathrm{app}}.
+\]
+For the main reported multilabel setup, $\mathcal{L}_{\mathrm{emo}}$ is binary cross-entropy with logits over the six non-neutral heads. $\mathcal{L}_{\mathrm{app}}$ is masked MSE against the appraisal prototype. The README and slides document a reported configuration with $\alpha=0.1$, AdamW, learning rate $5\times10^{-4}$, batch size 2 dialogues, three epochs, LoRA rank 8, and seed 42. Because final checkpoint arguments are not included, these should be read as documented project settings rather than independently verified run metadata.
+
+Table~\ref{tab:setup} lists the main reported setup and the evidence status for each item. Items marked as documented are supported by README, slides, code, or the project report, but they should still be checked against checkpoint \texttt{args.json} files before final archival release.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Item & Reported value & Evidence status \\
+\midrule
+Backbone & LLaMA-3-8B & documented \\
+LoRA rank & 8 & documented \\
+Emotion loss & six-head BCE & implemented \\
+Appraisal loss & masked MSE & implemented \\
+Optimizer & AdamW & documented/code \\
+Learning rate & $5\times10^{-4}$ & documented \\
+Threshold & 0.2 & documented \\
+\bottomrule
+\end{tabular}
+\caption{Main reported training setup. The repository documents these settings, but final checkpoint run metadata is not included.}
+\label{tab:setup}
+\end{table}
+
+\section{Experiments}
+
+\subsection{Setup}
+
+The project report uses MELD as the main benchmark. MELD contains multi-party conversations from \textit{Friends}, and the project uses text only; audio and visual modalities remain future work. Raw datasets are not shipped with the repository. The preprocessing code converts MELD, EmoryNLP, and DailyDialog into a shared dialogue JSONL schema, while the dataloader normalizes MELD and DailyDialog into the unified seven-label vocabulary.
+
+Rare labels are a central challenge. The reported main setup augments MELD training with DailyDialog dialogues that contain at least one of fear, disgust, or sadness. This is implemented through the \texttt{--dd\_rare} option. The training code also performs dialogue-level weighted sampling, rather than turn-level sampling, so sampled batches preserve complete dialogue context.
+
+\subsection{Baselines and Metrics}
+
+The implemented baselines are designed to isolate the contribution of memory structure. The stateless baseline predicts each turn from its appraisal vector without temporal memory. The BiLSTM-over-appraisals baseline replaces the exponential memory and BayesianHead with a bidirectional LSTM over appraisal sequences followed by an MLP classifier. EmoFlow itself is evaluated with learned $\lambda$ and with a no-decay memory setting.
+
+These are local baselines, not reimplementations of all published ERC systems. In particular, the BiLSTM baseline is not DialogueRNN: it uses the same appraisal encoder interface as EmoFlow, then applies a generic recurrent model over appraisal vectors. This makes the ablation useful for testing the form of memory within the project codebase, but it should not be described as a published DialogueRNN comparison.
+
+The evaluation code implements weighted F1 and Emotion Transition Accuracy (ETA). ETA counts correctness on turns where the true emotion differs from the previous turn in the same dialogue. In multilabel runs, the training script also computes a non-neutral weighted F1 by excluding neutral-labeled turns. These metrics are useful because overall weighted F1 can be dominated by frequent labels.
+
+\subsection{Reported Results}
+
+Table~\ref{tab:results} reproduces the main in-repository results documented in the project report, README, and slides. These are not independently recomputed here because the repository snapshot does not include the raw checkpoint metrics, processed data, or full training outputs. The comparison is therefore best read as the project report's matched ablation under the MELD+DailyDialog-rare setup, not as a controlled comparison with published MELD systems.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Model & wF1 & wF1$_{\mathrm{nonneu}}$ & ETA \\
+\midrule
+BiLSTM over appraisals & 0.4241 & -- & -- \\
+Stateless & 0.5631 & 0.4553 & 0.5462 \\
+EmoFlow, $\lambda=0$ & 0.6052 & 0.5348 & 0.5617 \\
+EmoFlow, learned $\lambda$ & 0.6171 & 0.5312 & 0.5528 \\
+\bottomrule
+\end{tabular}
+\caption{Project-report results under the matched MELD+DailyDialog-rare setup. Missing cells indicate values not consistently available in the planning evidence. These numbers are documented in project reports, but raw checkpoints and processed data are not included in this repository snapshot.}
+\label{tab:results}
+\end{table}
+
+Under this setup, the project report documents that learned-decay EmoFlow obtains the highest overall weighted F1 among the implemented baselines. The no-decay model is close in overall weighted F1 and slightly higher in non-neutral weighted F1 and ETA, suggesting that learned decay may optimize the dominant distribution while uniform history can preserve some rare-class signal. Preliminary results therefore suggest that structured appraisal memory is useful, but they do not support a broad claim that learned decay is always superior.
+
+The comparison also indicates that the form of temporal modeling matters. The stateless baseline performs below both EmoFlow variants, suggesting that context contributes useful information in this setup. The BiLSTM-over-appraisals baseline performs substantially worse than the stateless model in the documented table, which suggests that a generic recurrent layer over a small appraisal sequence can overfit or distort the representation under the available data. This observation should be kept narrow: it is evidence about the implemented BiLSTM baseline, not a general statement about all recurrent ERC architectures.
+
+\subsection{Failure Analysis}
+
+The report also documents a representation-collapse failure. An early AppraisalHead ended with a sigmoid to keep outputs in $[0,1]$, matching normalized appraisal targets. In practice, the head saturated, making appraisal outputs nearly constant across distinct inputs and preventing useful gradients from reaching the encoder. The implemented encoder removes the sigmoid and relies on the MSE loss to shape outputs toward the target range. The project report documents that this change restored input-dependent appraisal vectors and allowed later imbalance interventions to matter.
+
+This failure is a central engineering takeaway. Bounded activations can be harmful at low-dimensional bottlenecks when saturation blocks gradient flow. For EmoFlow, this was especially misleading because it looked like a class-imbalance problem: class weights, oversampling, and loss-side changes cannot help if the representation feeding the classifier has already collapsed.
+
+\subsection{Limitations and Reproducibility}
+
+Several limitations are important for interpreting the results. First, the headline result depends on selective DailyDialog rare-class augmentation; the project report documents a lower MELD-only post-fix score. Second, the fear class remains unresolved in the reported analysis. Third, the final post-fix pipeline was not evaluated on EmoryNLP or IEMOCAP. Fourth, MELD audio and visual features are unused. Fifth, the repository does not include raw datasets, processed data, final checkpoints, or raw metrics logs, so the reported numbers are documented but not fully reproducible from included artifacts alone.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\begin{tabular}{p{2.1cm}p{4.8cm}}
+\toprule
+Risk & Conservative interpretation \\
+\midrule
+External baselines & Context only; not controlled \\
+DailyDialog augmentation & Part of headline setup \\
+Missing checkpoints & Results documented, not independently verified here \\
+Fear class & Known unresolved failure \\
+Response generation & Proposed, deferred \\
+\bottomrule
+\end{tabular}
+\caption{Interpretation caveats used throughout the paper.}
+\label{tab:caveats}
+\end{table}
+
+\section{Related Work}
+
+\paragraph{Conversational emotion recognition.}
+ERC models commonly emphasize contextual and speaker-sensitive dependencies. MKE-IGN, a recent multimodal ERC system, frames multimodal ERC as emotion recognition in conversational videos and integrates textual and visual commonsense knowledge into graph edges \citep{tu2024mkeign}. This line of work is related but not a direct baseline for EmoFlow, because EmoFlow is text-only and uses selective cross-dataset augmentation.
+
+The broader ERC literature includes recurrent, memory-based, graph-based, and commonsense-enhanced approaches. These systems often focus on modeling dialogue context, speaker interactions, or multimodal fusion. EmoFlow instead asks whether a smaller psychologically motivated state--the appraisal vector--can carry enough affective information for context aggregation. This makes it complementary to graph-based ERC: graphs model rich interaction structure, while EmoFlow imposes a compact appraisal bottleneck and a simple causal memory.
+
+\paragraph{Appraisal theory.}
+Scherer's Component Process Model explains emotion differentiation through sequential stimulus evaluation checks \citep{scherer2001appraisal}. This motivates EmoFlow's appraisal bottleneck. The project does not claim utterance-level psychological annotations; rather, it derives weak supervision from emotion-level appraisal prototypes. Recent work on LLM emotion interpretability similarly uses appraisal theory to examine whether LLM emotion representations are psychologically plausible \citep{tak2025mechanistic}.
+
+This distinction is important. Appraisal theory provides structure, but the project does not observe a human annotator's appraisal of each MELD utterance. The supervision is constructed by mapping emotion labels to prototype appraisal profiles. As a result, appraisal targets should be treated as inductive bias and interpretability scaffolding, not as gold psychological measurements.
+
+\paragraph{Temporal emotion dynamics and affective agents.}
+Emotion unfolds over time, and dialogue models must avoid relying on future context when predicting current turns. MKE-IGN explicitly criticizes future-utterance leakage and uses directed graph structure to avoid it \citep{tu2024mkeign}. Chain-of-Emotion studies appraisal-based affective LLM game agents and provides adjacent evidence that appraisal-oriented structures can support simulated affective behavior \citep{croissant2024chain}. EmoFlow differs by focusing on classification rather than response generation or game-agent behavior.
+
+The course proposal originally pointed toward emotion-aware response generation, making affective-agent work relevant as future-work context. However, the delivered system stops at classification. This keeps the evaluation narrower but also avoids overclaiming about generated response quality, which would require a separate human or automatic evaluation protocol.
+
+\paragraph{Bayesian-inspired and probabilistic emotion modeling.}
+The implemented model uses Bayesian-style factorization between context prior and current likelihood, but it is not fully Bayesian. This connects broadly to computational emotion modeling, where psychological theories can be operationalized in approximate computational systems. EAI studies how emotions influence LLM decision-making in ethical and strategic settings, motivating the broader importance of modeling emotional state, though it is not an ERC baseline \citep{mozikov2024eai}.
+
+Future probabilistic work could replace the current logit addition with explicit latent-state inference or a calibrated update over emotion distributions. In the present implementation, the value of the Bayesian framing is primarily structural: it names two sources of evidence and prevents the model description from collapsing into an opaque monolithic classifier.
+
+\paragraph{Parameter-efficient LLM adaptation.}
+LoRA freezes pretrained weights and trains low-rank update matrices, reducing trainable parameters and memory requirements while avoiding additional inference latency after merging \citep{hu2021lora}. EmoFlow uses LoRA/QLoRA-style adaptation to train a small number of parameters on top of a frozen LLaMA-class backbone.
+
+\section{Conclusion and Future Work}
+
+EmoFlow is an appraisal-grounded, Bayesian-inspired classifier for conversational emotion recognition. Its main design choice is to map utterances into weakly supervised appraisal vectors, aggregate those vectors causally over dialogue history, and combine context prior with current appraisal likelihood in logit space. Under the documented in-repository setup, the project report shows that EmoFlow outperforms implemented stateless and BiLSTM-over-appraisals baselines, while also exposing a practical bottleneck-saturation failure.
+
+The evidence does not support a state-of-the-art claim or a controlled comparison with published MELD systems. The strongest supported takeaway is narrower: appraisal-grounded structure and causal exponential memory are plausible inductive biases for a small course-project ERC system, and the sigmoid-saturation failure is a concrete lesson for low-dimensional interpretable bottlenecks.
+
+Future work should complete the proposed response generator and human coherence evaluation, evaluate the post-fix classifier on EmoryNLP and IEMOCAP, incorporate MELD audio and visual modalities, improve rare-class and fear-class behavior, revisit an explicit Bayesian update, and release processed data, checkpoints, logs, and run metadata needed for full reproduction.
+
+\bibliography{anthology,custom}
+\bibliographystyle{acl_natbib}
+
+\end{document}
